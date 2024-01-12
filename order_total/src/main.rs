@@ -70,16 +70,26 @@ async fn handle_request(req: Request<Body>) -> Result<Response<Body>, anyhow::Er
             let mut order: Order = serde_json::from_slice(&byte_stream).unwrap();
 
             let client = reqwest::Client::new();
-            let rate = client.post(&*SALES_TAX_RATE_SERVICE)
+            let result = client.post(&*SALES_TAX_RATE_SERVICE)
                 .body(order.shipping_zip.clone())
                 .send()
-                .await?
-                .text()
-                .await?
-                .parse::<f32>()?;
+                .await;
+            let mapped_result = result.as_ref().map(|response| response.status().as_u16());
+            match mapped_result {
+                Ok(200) => {
+                    let rate = result.unwrap()
+                        .text()
+                        .await?
+                        .parse::<f32>()?;
 
-            order.total = order.subtotal * (1.0 + rate);
-            Ok(response_build(&serde_json::to_string_pretty(&order)?))
+                    order.total = order.subtotal * (1.0 + rate);
+                    Ok(response_build(&serde_json::to_string_pretty(&order)?))
+                },
+                _ => {
+                    let err_message = format!("{{\"status\":\"error\", \"message\":\"The zip code ({}) in the order does not have a corresponding sales tax rate.\"}}", order.shipping_zip.clone());
+                    Ok(response_build(err_message.as_str()))
+                }
+            }
         }
 
         // Return the 404 Not Found for other routes.
