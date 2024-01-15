@@ -63,6 +63,14 @@ jobs:
           echo -e "Execution Fail!"
           exit 1
         fi
+        resp=$(curl http://localhost:8002/compute -X POST -d @missing_zip.json)
+        echo "$resp"
+        if [[ $resp == *"missing field shipping zip"* ]]; then
+          echo -e "Execution Success!"
+        else
+          echo -e "Execution Fail!"
+          exit 1
+        fi
         kill -9 `cat sales_tax_rate/sales_tax_rate.pid`
         rm sales_tax_rate/sales_tax_rate.pid
         kill -9 `cat order_total/order_total.pid`

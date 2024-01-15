@@ -32,8 +32,14 @@
   }
 
   function updateOrderForm(json) {
-    alert("The order total for " + json.order_id + " has been updated to " + json.total);
-    totalField.value = json.total;
+    // alert(JSON.stringify(json));
+    if(typeof json.total != "undefined"){
+      alert("The order total for " + json.order_id + " has been updated to " + json.total);
+      totalField.value = json.total;
+    } else {
+      alert(json.message);
+      totalField.value = 'Update upon Compute Order';
+    }
   }
 
   document.getElementById("compute").addEventListener("click", onComputeButton);

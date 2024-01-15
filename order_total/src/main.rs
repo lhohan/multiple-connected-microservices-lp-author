@@ -1,12 +1,13 @@
 #[macro_use]
 extern crate lazy_static;
 
-use std::net::SocketAddr;
-use std::convert::Infallible;
-use std::str;
+use anyhow::Error;
 use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Method, Request, Response, StatusCode, Server};
+use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
+use std::net::SocketAddr;
+use std::str;
 
 lazy_static! {
     static ref SALES_TAX_RATE_SERVICE: String = {
@@ -67,27 +68,25 @@ async fn handle_request(req: Request<Body>) -> Result<Response<Body>, anyhow::Er
 
         (&Method::POST, "/compute") => {
             let byte_stream = hyper::body::to_bytes(req).await?;
-            let mut order: Order = serde_json::from_slice(&byte_stream).unwrap();
-
-            let client = reqwest::Client::new();
-            let result = client.post(&*SALES_TAX_RATE_SERVICE)
-                .body(order.shipping_zip.clone())
-                .send()
-                .await;
-            let mapped_result = result.as_ref().map(|response| response.status().as_u16());
-            match mapped_result {
-                Ok(200) => {
-                    let rate = result.unwrap()
-                        .text()
-                        .await?
-                        .parse::<f32>()?;
-
-                    order.total = order.subtotal * (1.0 + rate);
-                    Ok(response_build(&serde_json::to_string_pretty(&order)?))
-                },
-                _ => {
-                    let err_message = format!("{{\"status\":\"error\", \"message\":\"The zip code ({}) in the order does not have a corresponding sales tax rate.\"}}", order.shipping_zip.clone());
-                    Ok(response_build(err_message.as_str()))
+            let maybe_order = serde_json::from_slice(&byte_stream);
+            match maybe_order {
+                Ok(mut order) => handle_order(&mut order).await?,
+                Err(err) => {
+                    // only way to convert missing field error to other message is to check the string?
+                    let mut err_message = err.to_string();
+                    if err_message.contains("missing field") {
+                        err_message = err_message
+                            .to_lowercase()
+                            .replace("`", "")
+                            .replace("_", " ");
+                        match err_message.find("at") {
+                            Some(i) => err_message.truncate(i-1),
+                            _ => (), // do nothing
+                        }
+                    }
+                    let json_message =
+                        format!("{{\"status\":\"error\", \"message\":\"{}\"}}", err_message);
+                    Ok(response_build(json_message.as_str()))
                 }
             }
         }
@@ -101,12 +100,37 @@ async fn handle_request(req: Request<Body>) -> Result<Response<Body>, anyhow::Er
     }
 }
 
+async fn handle_order(order: &mut Order) -> Result<Result<Response<Body>, Error>, Error> {
+    let client = reqwest::Client::new();
+    let result = client
+        .post(&*SALES_TAX_RATE_SERVICE)
+        .body(order.shipping_zip.clone())
+        .send()
+        .await;
+    let mapped_result = result.as_ref().map(|response| response.status().as_u16());
+    Ok(match mapped_result {
+        Ok(200) => {
+            let rate = result.unwrap().text().await?.parse::<f32>()?;
+
+            order.total = order.subtotal * (1.0 + rate);
+            Ok(response_build(&serde_json::to_string_pretty(&order)?))
+        }
+        _ => {
+            let err_message = format!("{{\"status\":\"error\", \"message\":\"The zip code ({}) in the order does not have a corresponding sales tax rate.\"}}", order.shipping_zip.clone());
+            Ok(response_build(err_message.as_str()))
+        }
+    })
+}
+
 // CORS headers
 fn response_build(body: &str) -> Response<Body> {
     Response::builder()
         .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "api,Keep-Alive,User-Agent,Content-Type")
+        .header(
+            "Access-Control-Allow-Headers",
+            "api,Keep-Alive,User-Agent,Content-Type",
+        )
         .body(Body::from(body.to_owned()))
         .unwrap()
 }
@@ -114,12 +138,8 @@ fn response_build(body: &str) -> Response<Body> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = SocketAddr::from(([0, 0, 0, 0], 8002));
-    let make_svc = make_service_fn(|_| {
-        async move {
-            Ok::<_, Infallible>(service_fn(move |req| {
-                handle_request(req)
-            }))
-        }
+    let make_svc = make_service_fn(|_| async move {
+        Ok::<_, Infallible>(service_fn(move |req| handle_request(req)))
     });
     let server = Server::bind(&addr).serve(make_svc);
     dbg!("Server started on port 8002");
